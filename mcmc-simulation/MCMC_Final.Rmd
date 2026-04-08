@@ -1,0 +1,130 @@
+---
+title: "Métodos MCMC: Implementação, Diagnóstico e Aplicações Práticas"
+author: "Ana Margarida Costa, Elisa Fornelos, João Rocha e Rita Mota"
+date: "`r format(Sys.Date(), '%d de %B de %Y')`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introdução
+
+Este relatório apresenta a implementação do algoritmo Metropolis-Hastings, análise de convergência e diagnóstico via estatísticas de Gelman-Rubin e ESS. Todas as figuras são geradas automaticamente e guardadas na pasta `figures`.
+
+```{r, message=FALSE, warning=FALSE}
+library(coda)
+set.seed(123)
+
+# Pasta figures
+if(!dir.exists("figures")) dir.create("figures")
+
+# Distribuição alvo (não normalizada)
+target <- function(x) exp(-x^4 + x^2 - x)
+
+# Algoritmo MH com registo da taxa de aceitação
+metropolis <- function(n, x0, proposal_sd) {
+  x <- numeric(n)
+  accept <- logical(n)
+  x[1] <- x0
+  for (i in 2:n) {
+    y <- rnorm(1, x[i-1], proposal_sd)
+    alpha <- min(1, target(y)/target(x[i-1]))
+    if (runif(1) < alpha) {
+      x[i] <- y
+      accept[i] <- TRUE
+    } else {
+      x[i] <- x[i-1]
+      accept[i] <- FALSE
+    }
+  }
+  list(samples = x, accept = accept)
+}
+
+n_iter <- 10000
+chain1 <- metropolis(n_iter, x0 = 0, proposal_sd = 1)
+chain2 <- metropolis(n_iter, x0 = 5, proposal_sd = 1)
+
+mcmc_list <- mcmc.list(mcmc(chain1$samples), mcmc(chain2$samples))
+```
+
+# Diagnóstico de Convergência
+
+## Traceplots
+```{r, fig.width=8, fig.height=5}
+plot(mcmc_list, main="Traceplots das duas cadeias MH")
+```
+
+## Autocorrelação
+```{r, fig.width=8, fig.height=5}
+autocorr.plot(mcmc_list)
+```
+
+## Gelman-Rubin
+```{r, fig.width=8, fig.height=5}
+gr <- gelman.diag(mcmc_list)
+barplot(gr$psrf[,1], col="steelblue", main="Estatística R-hat (Gelman-Rubin)",
+        ylab="R-hat", ylim=c(0.9, 1.1))
+abline(h=1, col="red", lty=2)
+```
+
+# Análise Gráfica e Estatística
+
+## Histograma + densidade alvo
+```{r, fig.width=8, fig.height=5}
+hist(chain1$samples, breaks=60, freq=FALSE, col="lightgray",
+     main="Amostras MH e densidade alvo", xlab="x", ylim= c(0,1))
+curve(exp(-x^4 + x^2 - x)/3, add=TRUE, col="red", lwd=2)
+```
+
+## Taxa de Aceitação
+```{r, fig.width=8, fig.height=5}
+window_size <- 200
+accept_rate <- sapply(seq(window_size, n_iter, by=window_size), function(i) {
+  mean(chain1$accept[(i-window_size+1):i])
+})
+plot(seq_along(accept_rate)*window_size, accept_rate, type="l", lwd=2,
+     col="blue", ylim=c(0,1),
+     main="Taxa de aceitação ao longo das iterações", xlab="Iterações", ylab="Taxa")
+abline(h=0.3, col="red", lty=2)
+```
+
+## QQ-Plot
+```{r, fig.width=8, fig.height=5}
+x_grid <- seq(-2, 2, length.out=10000)
+dens <- exp(-x_grid^4 + x_grid^2 - x_grid)
+dens <- dens/sum(dens)
+sample_theoretical <- sample(x_grid, size=length(chain1$samples), prob=dens, replace=TRUE)
+
+qqplot(sample_theoretical, chain1$samples, main="QQ-Plot: Teórico vs MCMC",
+       xlab="Quantis teóricos", ylab="Quantis MCMC", col="darkblue")
+abline(0,1,col="red",lwd=2)
+```
+
+# Resultados Numéricos
+
+```{r}
+mean_est <- mean(chain1$samples)
+sd_est <- sd(chain1$samples)
+ess_est <- effectiveSize(mcmc(chain1$samples))
+cat(sprintf("E[X] ≈ %.3f, SD ≈ %.3f, ESS = %.0f\n", mean_est, sd_est, ess_est))
+```
+
+## Média acumulada
+```{r, fig.width=8, fig.height=5}
+running_mean <- cumsum(chain1$samples) / seq_along(chain1$samples)
+plot(running_mean, type = "l", lwd = 2, col = "darkgreen",
+     main = "Evolução da média acumulada",
+     xlab = "Iterações", ylab = expression(hat(mu)[t]))
+abline(h = mean(chain1$samples), col = "red", lty = 2)
+```
+
+## Densidade kernel estimada
+```{r, fig.width=8, fig.height=5}
+plot(density(chain1$samples), main="Densidade kernel das amostras MCMC",
+     xlab="x", ylab="Densidade estimada", lwd=2, col="darkgreen", ylim=c(0,1))
+curve(exp(-x^4 + x^2 - x)/3, add=TRUE, col="red", lwd=2, lty=2)
+legend("topright", legend=c("MCMC", "Densidade teórica"), 
+       col=c("darkgreen", "red"), lwd=2, lty=c(1,2))
+```

@@ -1,0 +1,144 @@
+---
+title: "Comparação de Métodos MCMC: Adaptive Metropolis, HMC e NUTS"
+author: "Diogo Azevedo"
+date: "`r Sys.Date()`"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+
+set.seed(123)
+
+library(dplyr)
+library(coda)
+library(rstan)
+library(bayesplot)
+library(ggplot2)
+library(gridExtra)
+library(mvtnorm)
+library(reshape2)
+
+options(mc.cores = parallel::detectCores())
+theme_set(bayesplot::theme_default())
+
+rstan::rstan_options(auto_write = TRUE)
+```
+
+```{r data}
+data <- read.csv("kidney_dataset.csv")
+
+stopifnot("CKD_Status" %in% names(data))
+stopifnot(all(data$CKD_Status %in% c(0,1)))
+
+y <- as.numeric(data$CKD_Status)
+X <- dplyr::select(data, -CKD_Status)
+
+X <- model.matrix(~ ., X)[, -1, drop = FALSE]
+X <- scale(X)
+
+Xmat <- cbind(1, X)
+K <- ncol(Xmat)
+N <- nrow(Xmat)
+```
+
+```{r logposterior}
+log_post <- function(beta){
+  eta <- Xmat %*% beta
+  loglik <- sum(y * eta - log1p(exp(eta)))
+  logprior <- sum(dnorm(beta, 0, 10, log = TRUE))
+  loglik + logprior
+}
+```
+
+```{r adaptive-metropolis}
+adaptive_metropolis <- function(n_iter = 20000, cov_scaling = 0.1){
+  theta <- rep(0, K)
+  chain <- matrix(NA, n_iter, K)
+  chain[1,] <- theta
+  covmat <- diag(K) * cov_scaling
+  acc <- 0
+
+  for (i in 2:n_iter){
+    proposal <- as.numeric(theta + mvtnorm::rmvnorm(1, sigma = covmat))
+    log_alpha <- log_post(proposal) - log_post(theta)
+    if (log(runif(1)) < log_alpha){
+      theta <- proposal
+      acc <- acc + 1
+    }
+    chain[i,] <- theta
+    if (i > 500){
+      covmat <- cov(chain[1:i, ]) + diag(K) * 1e-6
+    }
+  }
+  list(samples = as.mcmc(chain), acc_rate = acc / n_iter)
+}
+
+AM <- adaptive_metropolis()
+AM_samples <- AM$samples
+colnames(AM_samples) <- paste0("beta_", seq_len(K))
+```
+
+```{r stan}
+stan_code <- "
+data {
+  int<lower=1> N;
+  int<lower=1> K;
+  matrix[N, K] X;
+  int<lower=0,upper=1> y[N];
+}
+parameters {
+  vector[K] beta;
+}
+model {
+  beta ~ normal(0, 10);
+  y ~ bernoulli_logit(X * beta);
+}
+"
+
+writeLines(stan_code, "model.stan")
+
+stan_data <- list(N=N, K=K, X=Xmat, y=y)
+
+fit_hmc <- stan(
+  file = "model.stan", data = stan_data,
+  chains = 4, iter = 2000, warmup = 1000,
+  algorithm = "HMC", seed = 123, refresh = 0
+)
+
+fit_nuts <- stan(
+  file = "model.stan", data = stan_data,
+  chains = 4, iter = 2000, warmup = 1000,
+  algorithm = "NUTS", seed = 123, refresh = 0
+)
+
+HMC_samples <- As.mcmc.list(fit_hmc)
+NUTS_samples <- As.mcmc.list(fit_nuts)
+```
+
+```{r rename}
+rename_stan_samples <- function(mcmc_list){
+  for (i in seq_along(mcmc_list)){
+    cn <- colnames(mcmc_list[[i]])
+    cn <- gsub("beta\\[", "beta_", cn)
+    cn <- gsub("\\]", "", cn)
+    colnames(mcmc_list[[i]]) <- cn
+  }
+  mcmc_list
+}
+
+HMC_samples <- rename_stan_samples(HMC_samples)
+NUTS_samples <- rename_stan_samples(NUTS_samples)
+```
+
+```{r traceplots}
+save_trace <- function(samples, name){
+  p <- mcmc_trace(samples, pars = paste0("beta_", 1:3)) +
+    ggtitle(paste("Traceplot –", name))
+  ggsave(paste0("trace_", name, ".png"), p, width = 12, height = 8)
+}
+
+save_trace(AM_samples, "AM")
+save_trace(HMC_samples, "HMC")
+save_trace(NUTS_samples, "NUTS")
+```
